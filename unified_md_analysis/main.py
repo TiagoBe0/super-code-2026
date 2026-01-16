@@ -16,27 +16,28 @@ def create_parser():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 PIPELINE COMPLETO:
-  1. Preprocesamiento: Extrae superficie con Alpha Shape + Ghost Particles
+  1. Alpha Shape: Extrae superficie con Ghost Particles
   2. Clustering (opcional): Separa nanoporos individuales
-  3. Extracción: Calcula 37 features geométricas
-  4. Entrenamiento: Entrena modelo Random Forest
+  3. Preprocesamiento: Calcula 37 features geométricas
+  4. Training: Entrena modelo Random Forest
   5. Predicción: Predice vacancias en nuevos dumps
 
 SUBCOMANDOS:
-  preprocess    Preprocesamiento con Alpha Shape
+  alpha_shape   Detección de superficie con Alpha Shape
   cluster       Clustering de nanoporos
-  extract       Extracción de features
+  preprocess    Extracción de features (preprocesamiento para ML)
   train         Entrenamiento de modelo
   predict       Predicción de vacancias
 
 EJEMPLOS:
   # Ver ayuda de cada subcomando
+  python main.py alpha_shape --help
   python main.py preprocess --help
   python main.py train --help
 
   # Pipeline completo (ejemplo)
-  python main.py preprocess raw.dump surface.dump
-  python main.py extract surface_dumps/ --output features.csv
+  python main.py alpha_shape raw.dump surface.dump
+  python main.py preprocess surface_dumps/ --output features.csv
   python main.py train features.csv --output models/
   python main.py predict models/modelo_rf.joblib new_dump.dump
         """
@@ -45,9 +46,9 @@ EJEMPLOS:
     subparsers = parser.add_subparsers(dest='command', help='Subcomandos disponibles')
 
     # Cada subcomando delega a su CLI específico
-    subparsers.add_parser('preprocess', add_help=False)
+    subparsers.add_parser('alpha_shape', add_help=False)
     subparsers.add_parser('cluster', add_help=False)
-    subparsers.add_parser('extract', add_help=False)
+    subparsers.add_parser('preprocess', add_help=False)
     subparsers.add_parser('train', add_help=False)
     subparsers.add_parser('predict', add_help=False)
 
@@ -64,9 +65,9 @@ def main():
 
     # Mapear comandos a CLIs
     cli_map = {
-        'preprocess': 'cli.preprocess',
+        'alpha_shape': 'cli.alpha_shape',
         'cluster': 'cli.cluster',
-        'extract': 'cli.extract',
+        'preprocess': 'cli.preprocess',
         'train': 'cli.train',
         'predict': 'cli.predict'
     }

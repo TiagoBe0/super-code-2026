@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Dict, List, Union, Optional
 from sklearn.ensemble import RandomForestRegressor
 
-from .feature_extraction import extract_all_features, features_to_array
+from .preprocessing import extract_all_features, features_to_array
 from ..utils.lammps_parser import LAMMPSDumpParser
 from ..utils.constants import FEATURE_ORDER
 

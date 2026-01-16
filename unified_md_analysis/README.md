@@ -4,9 +4,9 @@ Software unificado para análisis de estructuras cristalinas FCC/BCC en simulaci
 
 ## 📋 Características
 
-- **Preprocesamiento**: Alpha Shape con Ghost Particles para detección de superficies
+- **Alpha Shape**: Detección de superficie con Ghost Particles
 - **Clustering**: Separación de nanoporos con HDBSCAN, KMeans, MeanShift, Agglomerative
-- **Extracción de Features**: 37 features geométricas para Machine Learning
+- **Preprocesamiento**: Extracción de 37 features geométricas para Machine Learning
 - **Training**: Entrenamiento de Random Forest para predicción de vacancias
 - **Predicción**: Inferencia de vacancias en nuevos dumps
 
@@ -15,18 +15,18 @@ Software unificado para análisis de estructuras cristalinas FCC/BCC en simulaci
 ```
 unified_md_analysis/
 ├── core/
-│   ├── preprocessing.py      # Alpha Shape + Ghost Particles
+│   ├── surface_detection.py  # Alpha Shape + Ghost Particles
 │   ├── clustering.py          # Clustering (HDBSCAN, KMeans, etc.)
-│   ├── feature_extraction.py # Extracción de 37 features
+│   ├── preprocessing.py       # Extracción de 37 features
 │   ├── training.py            # Entrenamiento Random Forest
 │   └── prediction.py          # Predicción de vacancias
 ├── utils/
 │   ├── constants.py           # Constantes globales
 │   └── lammps_parser.py       # Parser LAMMPS unificado
 ├── cli/
-│   ├── preprocess.py          # CLI preprocesamiento
+│   ├── alpha_shape.py         # CLI detección de superficie
 │   ├── cluster.py             # CLI clustering
-│   ├── extract.py             # CLI extracción
+│   ├── preprocess.py          # CLI extracción de features
 │   ├── train.py               # CLI training
 │   └── predict.py             # CLI predicción
 ├── main.py                    # Orquestador principal
@@ -48,15 +48,15 @@ pip install hdbscan
 
 ## 📖 Uso
 
-### 1️⃣ Preprocesamiento (Alpha Shape)
+### 1️⃣ Alpha Shape (Detección de Superficie)
 
 Detecta átomos superficiales eliminando bulk:
 
 ```bash
-python main.py preprocess input.dump output_surface.dump
+python main.py alpha_shape input.dump output_surface.dump
 
 # Con parámetros personalizados
-python main.py preprocess input.dump output.dump \
+python main.py alpha_shape input.dump output.dump \
     --probe-radius 2.2 \
     --num-ghost-layers 3 \
     --smoothing 10
@@ -89,15 +89,15 @@ python main.py cluster surface.dump clusters_dir/ --method meanshift
 
 ---
 
-### 3️⃣ Extracción de Features
+### 3️⃣ Preprocesamiento (Extracción de Features)
 
-Extrae 37 features geométricas:
+Extrae 37 features geométricas para Machine Learning:
 
 ```bash
-python main.py extract surface_dumps_dir/ --output features.csv
+python main.py preprocess surface_dumps_dir/ --output features.csv
 
 # Con vacancias conocidas (para training)
-python main.py extract dumps/ --output features.csv --vacancies-file vacancies.txt
+python main.py preprocess dumps/ --output features.csv --vacancies-file vacancies.txt
 ```
 
 **Features extraídas (37 total):**
@@ -110,7 +110,7 @@ python main.py extract dumps/ --output features.csv --vacancies-file vacancies.t
 
 ---
 
-### 4️⃣ Entrenamiento
+### 4️⃣ Training
 
 Entrena modelo Random Forest:
 
@@ -147,13 +147,13 @@ python main.py predict models/modelo_rf.joblib dumps_dir/ --output predictions.c
 ## 🔧 Pipeline Completo (Ejemplo)
 
 ```bash
-# 1. Preprocesar dumps
+# 1. Detectar superficie (Alpha Shape)
 for dump in raw_dumps/*.dump; do
-    python main.py preprocess "$dump" "surface_dumps/$(basename $dump)"
+    python main.py alpha_shape "$dump" "surface_dumps/$(basename $dump)"
 done
 
-# 2. Extraer features (con vacancias conocidas)
-python main.py extract surface_dumps/ --output features.csv --vacancies-file vacancies.txt
+# 2. Preprocesar: Extraer features (con vacancias conocidas)
+python main.py preprocess surface_dumps/ --output features.csv --vacancies-file vacancies.txt
 
 # 3. Entrenar modelo
 python main.py train features.csv --output models/
@@ -207,9 +207,9 @@ Basado en el análisis del repositorio original:
 
 | Etapa | Código Base | Razón |
 |-------|-------------|-------|
-| **Preprocesamiento** | `alpha_shape_ghost_particles.py` | Clase modular, sin Streamlit, auto-detecta lattice |
+| **Alpha Shape** | `alpha_shape_ghost_particles.py` | Clase modular, sin Streamlit, auto-detecta lattice |
 | **Clustering** | `cluster_app_spirit.py` | 4 algoritmos, métricas completas |
-| **Features** | `simplified_extractor_enhanced.py` | 37 features, PCA optimizado |
+| **Preprocesamiento** | `simplified_extractor_enhanced.py` | 37 features, PCA optimizado |
 | **Training** | `train_simplified.py` | Código limpio, 330 líneas |
 | **Predicción** | `vacancy_batch_predict.py` | Batch optimizado, consistente |
 
@@ -222,6 +222,15 @@ Basado en el análisis del repositorio original:
 ✅ **Consistente**: Parser LAMMPS y constantes unificadas
 ✅ **Documentado**: Docstrings completas en cada módulo
 ✅ **Extensible**: Fácil agregar nuevos algoritmos
+
+---
+
+## 🎯 Nomenclatura Correcta
+
+- **Alpha Shape** = Detección de superficie (NO es preprocesamiento)
+- **Preprocesamiento** = Extracción de features (preparación para ML)
+- **Training** = Entrenamiento del modelo
+- **Predicción** = Inferencia de vacancias
 
 ---
 

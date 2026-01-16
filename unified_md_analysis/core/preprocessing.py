@@ -1,531 +1,420 @@
 """
-Preprocesamiento: Alpha Shape con Ghost Particles
-Detección de átomos superficiales en nanoporos usando triangulación de Delaunay
+Preprocesamiento: Extracción de Features para Machine Learning
+Análisis de geometría de nanoporos - Extrae 37 features desde posiciones atómicas
 """
 
 import numpy as np
-from scipy.spatial import Delaunay, cKDTree
-from typing import Tuple, Optional
+from scipy.spatial import ConvexHull
+from scipy.stats import kurtosis, entropy
+from scipy.ndimage import label
+from sklearn.decomposition import PCA
+from sklearn.cluster import estimate_bandwidth
+from typing import Dict, Tuple
 
-from ..utils.constants import DEFAULT_PROBE_RADIUS, GHOST_LAYER_THICKNESS, A0
+from ..utils.constants import A0, GRID_SIZE, BOX_SIZE_MAX, FEATURE_ORDER
 
 
-def detect_lattice_parameter(positions: np.ndarray, sample_size: int = 1000) -> float:
+def normalize_positions(positions: np.ndarray) -> Tuple[np.ndarray, float]:
     """
-    Detecta automáticamente el parámetro de red cristalino analizando distancias
-    entre vecinos cercanos
+    Normaliza y alinea posiciones usando PCA optimizado
+
+    - Centra posiciones en origen
+    - Alinea con componentes principales (PCA)
+    - Normaliza por parámetro de red A0
+    - Calcula box_size apropiado
 
     Args:
         positions: array Nx3 de posiciones atómicas
-        sample_size: número de átomos a muestrear para acelerar cálculo
 
     Returns:
-        lattice_param: parámetro de red detectado en Angstroms
+        normalized: posiciones normalizadas y alineadas
+        box_size: tamaño de caja normalizada
     """
-    # Muestrear átomos para acelerar
-    if len(positions) > sample_size:
-        indices = np.random.choice(len(positions), sample_size, replace=False)
-        sample = positions[indices]
-    else:
-        sample = positions
+    if len(positions) < 3:
+        return positions / A0, 2.0
 
-    # Construir KD-Tree para búsqueda eficiente de vecinos
-    tree = cKDTree(sample)
+    centered = positions - positions.mean(axis=0)
 
-    # Recolectar distancias a vecinos cercanos
-    distances_list = []
-    for pos in sample[:min(100, len(sample))]:
-        dists, _ = tree.query(pos, k=13)  # 12 vecinos + el mismo átomo
-        # Excluir distancia 0 (el mismo átomo)
-        dists = dists[dists > 0.1]
-        if len(dists) > 0:
-            distances_list.extend(dists[:4])  # Primeros 4 vecinos
+    # MEJORADO: Usar covariance_eigh es óptimo para muchos átomos
+    try:
+        pca = PCA(n_components=3, svd_solver='covariance_eigh')
+        aligned = pca.fit_transform(centered)
+    except Exception:
+        # Fallback al solver automático si hay problemas numéricos
+        pca = PCA(n_components=3, svd_solver='auto')
+        aligned = pca.fit_transform(centered)
 
-    if not distances_list:
-        raise ValueError("No se pudieron encontrar vecinos para detectar parámetro de red")
+    normalized = aligned / A0
 
-    # El parámetro de red es la distancia más común entre primeros vecinos
-    distances = np.array(distances_list)
-    hist, bin_edges = np.histogram(distances, bins=50)
-    peak_idx = np.argmax(hist)
-    lattice_param = (bin_edges[peak_idx] + bin_edges[peak_idx + 1]) / 2
+    extent = normalized.max(axis=0) - normalized.min(axis=0)
+    box_size = max(1.5, min(extent.max() * 1.5, BOX_SIZE_MAX))
 
-    print(f"\n[Auto-detección] Parámetro de red detectado: {lattice_param:.4f} Å")
-
-    return lattice_param
+    return normalized, box_size
 
 
-def create_ghost_layers(positions: np.ndarray,
-                       box_bounds: Tuple[Tuple[float, float], ...],
-                       lattice_param: float,
-                       num_layers: int = 2) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+def calc_grid_features(positions: np.ndarray, box_size: float) -> Dict[str, float]:
     """
-    Crea capas fantasma (ghost particles) en CARAS, ARISTAS y ESQUINAS del box
-    para implementar Periodic Boundary Conditions (PBC) completas
+    Calcula 26 features avanzadas del grid 3D de ocupación
 
-    Esta técnica elimina artefactos de superficie falsa en los bordes de la caja
+    Features:
+    - 6 básicas: ocupación total, fracción, medias por eje, spread
+    - 4 gradientes: cambios de ocupación en x, y, z
+    - 1 fragmentación: número de clusters separados
+    - 2 compacidad: superficie y ratio volumen/superficie
+    - 3 centro de masa: posición normalizada del centroide
+    - 1 asimetría: skewness en eje x
+    - 1 entropía: entropía espacial del grid
+    - 3 momentos de inercia: valores propios del tensor de inercia
+    - 5 densidad por capas: ocupación en capas z específicas
 
     Args:
-        positions: array Nx3 de posiciones atómicas originales
-        box_bounds: ((xmin,xmax), (ymin,ymax), (zmin,zmax))
-        lattice_param: parámetro de red cristalino
-        num_layers: número de capas a replicar en cada cara (default: 2)
+        positions: array Nx3 de posiciones normalizadas
+        box_size: tamaño de caja normalizada
 
     Returns:
-        ghost_positions: array con posiciones originales + fantasmas
-        ghost_map: mapeo índice_ghost -> índice_original (-1 para originales)
-        is_ghost: array booleano indicando si cada átomo es fantasma
+        features: diccionario con 26 features
     """
-    print(f"\n{'='*80}")
-    print(f"CREANDO GHOST PARTICLES COMPLETO (Caras + Aristas + Esquinas)")
-    print(f"{'='*80}")
-    print(f"\nParámetros:")
-    print(f"  - Parámetro de red: {lattice_param:.4f} Å")
-    print(f"  - Capas por cara: {num_layers}")
-    print(f"  - Grosor total: {num_layers * lattice_param:.4f} Å")
+    N, M, L = GRID_SIZE
+    grid = np.zeros((N, M, L), dtype=np.int8)
 
-    all_positions = list(positions)
-    ghost_map = [-1] * len(positions)  # -1 = átomo original
-    is_ghost = [False] * len(positions)
+    half_box = box_size / 2.0
+    cell_size = box_size / np.array(GRID_SIZE)
 
-    ghost_layer_thickness = num_layers * lattice_param
-    box_sizes = [box_bounds[i][1] - box_bounds[i][0] for i in range(3)]
+    # Llenar grid
+    for pos in positions:
+        indices = np.floor((pos + half_box) / cell_size).astype(int)
+        if np.all(indices >= 0) and np.all(indices < GRID_SIZE):
+            grid[indices[0], indices[1], indices[2]] = 1
 
-    # Identificar átomos en cada región (cerca de caras)
-    atoms_by_region = {}
-    for i, pos in enumerate(positions):
-        region = []
-        for dim in range(3):
-            dist_from_min = pos[dim] - box_bounds[dim][0]
-            dist_from_max = box_bounds[dim][1] - pos[dim]
+    occupancy_total = grid.sum()
+    features = {}
 
-            if dist_from_min < ghost_layer_thickness:
-                region.append(f'{dim}_min')
-            elif dist_from_max < ghost_layer_thickness:
-                region.append(f'{dim}_max')
+    # ========== FEATURES BÁSICAS (6) ==========
+    features['occupancy_total'] = float(occupancy_total)
+    features['occupancy_fraction'] = float(grid.mean())
 
-        if region:  # Átomo está cerca de algún borde
-            region_key = tuple(sorted(region))
-            if region_key not in atoms_by_region:
-                atoms_by_region[region_key] = []
-            atoms_by_region[region_key].append((i, pos))
+    for axis, name in enumerate(['x', 'y', 'z']):
+        slices = grid.sum(axis=axis)
+        features[f'occupancy_{name}_mean'] = float(slices.mean())
 
-    # Generar traslaciones para PBC completo
-    translations = []
-    for dx in [-1, 0, 1]:
-        for dy in [-1, 0, 1]:
-            for dz in [-1, 0, 1]:
-                if dx == 0 and dy == 0 and dz == 0:
-                    continue  # No trasladar átomos originales
-                translations.append((dx, dy, dz))
-
-    ghost_count_by_type = {'caras': 0, 'aristas': 0, 'esquinas': 0}
-
-    # Para cada región, crear ghosts apropiados
-    for region_key, atoms in atoms_by_region.items():
-        num_dims = len(region_key)  # Cuántas dimensiones están en el borde
-
-        if num_dims == 1:
-            region_type = 'caras'
-        elif num_dims == 2:
-            region_type = 'aristas'
-        else:  # num_dims == 3
-            region_type = 'esquinas'
-
-        # Para cada átomo en esta región
-        for orig_idx, orig_pos in atoms:
-            # Determinar qué traslaciones son necesarias
-            needed_shifts = []
-
-            for dim_side in region_key:
-                dim = int(dim_side[0])
-                side = dim_side[2:]  # 'min' o 'max'
-
-                if side == 'min':
-                    # Átomo cerca del mínimo → replicar hacia el máximo
-                    needed_shifts.append((dim, +1))
-                else:
-                    # Átomo cerca del máximo → replicar hacia el mínimo
-                    needed_shifts.append((dim, -1))
-
-            # Generar combinaciones de shifts según el tipo de región
-            if region_type == 'caras':
-                # 1 cara: solo un shift
-                dim, direction = needed_shifts[0]
-                ghost_pos = orig_pos.copy()
-                ghost_pos[dim] += direction * box_sizes[dim]
-                all_positions.append(ghost_pos)
-                ghost_map.append(orig_idx)
-                is_ghost.append(True)
-                ghost_count_by_type['caras'] += 1
-
-            elif region_type == 'aristas':
-                # 2 dimensiones: 3 shifts (2 individuales + 1 combinado)
-                dim1, dir1 = needed_shifts[0]
-                dim2, dir2 = needed_shifts[1]
-
-                # Shift individual 1
-                ghost_pos1 = orig_pos.copy()
-                ghost_pos1[dim1] += dir1 * box_sizes[dim1]
-                all_positions.append(ghost_pos1)
-                ghost_map.append(orig_idx)
-                is_ghost.append(True)
-
-                # Shift individual 2
-                ghost_pos2 = orig_pos.copy()
-                ghost_pos2[dim2] += dir2 * box_sizes[dim2]
-                all_positions.append(ghost_pos2)
-                ghost_map.append(orig_idx)
-                is_ghost.append(True)
-
-                # Shift combinado
-                ghost_pos12 = orig_pos.copy()
-                ghost_pos12[dim1] += dir1 * box_sizes[dim1]
-                ghost_pos12[dim2] += dir2 * box_sizes[dim2]
-                all_positions.append(ghost_pos12)
-                ghost_map.append(orig_idx)
-                is_ghost.append(True)
-
-                ghost_count_by_type['aristas'] += 3
-
-            elif region_type == 'esquinas':
-                # 3 dimensiones: 7 shifts (3 individuales + 3 dobles + 1 triple)
-                dim1, dir1 = needed_shifts[0]
-                dim2, dir2 = needed_shifts[1]
-                dim3, dir3 = needed_shifts[2]
-
-                # 3 shifts individuales
-                for dim, direction in needed_shifts:
-                    ghost_pos = orig_pos.copy()
-                    ghost_pos[dim] += direction * box_sizes[dim]
-                    all_positions.append(ghost_pos)
-                    ghost_map.append(orig_idx)
-                    is_ghost.append(True)
-
-                # 3 shifts dobles (aristas)
-                ghost_pos12 = orig_pos.copy()
-                ghost_pos12[dim1] += dir1 * box_sizes[dim1]
-                ghost_pos12[dim2] += dir2 * box_sizes[dim2]
-                all_positions.append(ghost_pos12)
-                ghost_map.append(orig_idx)
-                is_ghost.append(True)
-
-                ghost_pos13 = orig_pos.copy()
-                ghost_pos13[dim1] += dir1 * box_sizes[dim1]
-                ghost_pos13[dim3] += dir3 * box_sizes[dim3]
-                all_positions.append(ghost_pos13)
-                ghost_map.append(orig_idx)
-                is_ghost.append(True)
-
-                ghost_pos23 = orig_pos.copy()
-                ghost_pos23[dim2] += dir2 * box_sizes[dim2]
-                ghost_pos23[dim3] += dir3 * box_sizes[dim3]
-                all_positions.append(ghost_pos23)
-                ghost_map.append(orig_idx)
-                is_ghost.append(True)
-
-                # 1 shift triple (esquina opuesta)
-                ghost_pos123 = orig_pos.copy()
-                ghost_pos123[dim1] += dir1 * box_sizes[dim1]
-                ghost_pos123[dim2] += dir2 * box_sizes[dim2]
-                ghost_pos123[dim3] += dir3 * box_sizes[dim3]
-                all_positions.append(ghost_pos123)
-                ghost_map.append(orig_idx)
-                is_ghost.append(True)
-
-                ghost_count_by_type['esquinas'] += 7
-
-    ghost_positions = np.array(all_positions)
-    ghost_map = np.array(ghost_map)
-    is_ghost = np.array(is_ghost)
-
-    n_ghosts = np.sum(is_ghost)
-
-    print(f"\n{'='*80}")
-    print(f"RESUMEN GHOST PARTICLES")
-    print(f"{'='*80}")
-    print(f"  Átomos originales: {len(positions)}")
-    print(f"  Ghosts (caras):    {ghost_count_by_type['caras']}")
-    print(f"  Ghosts (aristas):  {ghost_count_by_type['aristas']}")
-    print(f"  Ghosts (esquinas): {ghost_count_by_type['esquinas']}")
-    print(f"  Total ghosts:      {n_ghosts}")
-    print(f"  Total para Delaunay: {len(ghost_positions)}")
-    print(f"{'='*80}\n")
-
-    return ghost_positions, ghost_map, is_ghost
-
-
-class AlphaShapeWithGhosts:
-    """
-    Alpha Shape usando Ghost Particles (técnica de OVITO)
-
-    Detecta átomos superficiales en nanoporos eliminando artefactos de borde
-    mediante la técnica de Periodic Boundary Conditions con ghost particles
-    """
-
-    def __init__(self,
-                 positions: np.ndarray,
-                 probe_radius: float = DEFAULT_PROBE_RADIUS,
-                 box_bounds: Optional[Tuple[Tuple[float, float], ...]] = None,
-                 lattice_param: Optional[float] = None,
-                 num_ghost_layers: int = 2,
-                 smoothing_level: int = 0):
-        """
-        Args:
-            positions: array Nx3 de posiciones atómicas
-            probe_radius: radio de la esfera de prueba (Angstroms)
-            box_bounds: límites de caja ((xmin,xmax), (ymin,ymax), (zmin,zmax))
-            lattice_param: parámetro de red (None = auto-detectar)
-            num_ghost_layers: número de capas fantasma (default: 2)
-            smoothing_level: iteraciones de suavizado Laplaciano (default: 0)
-        """
-        self.positions_original = np.array(positions, dtype=np.float64)
-        self.probe_radius = probe_radius
-        self.smoothing_level = smoothing_level
-        self.num_ghost_layers = num_ghost_layers
-
-        # Auto-detectar box bounds
-        if box_bounds is None:
-            box_bounds = tuple(
-                (self.positions_original[:, i].min(),
-                 self.positions_original[:, i].max())
-                for i in range(3)
-            )
-        self.box_bounds = box_bounds
-
-        # Auto-detectar parámetro de red
-        if lattice_param is None:
-            self.lattice_param = detect_lattice_parameter(self.positions_original)
-        else:
-            self.lattice_param = lattice_param
-
-        # Resultados (calculados en perform())
-        self.ghost_positions = None
-        self.ghost_map = None
-        self.is_ghost = None
-        self.surface_vertices = None
-        self.surface_faces = None
-        self.surface_area = None
-        self._surface_atom_indices = None
-
-    def perform(self) -> 'AlphaShapeWithGhosts':
-        """
-        Ejecutar Alpha Shape con ghost particles
-
-        Returns:
-            self (para encadenamiento de métodos)
-        """
-        print(f"\n{'='*80}")
-        print(f"ALPHA SHAPE CON GHOST PARTICLES")
-        print(f"{'='*80}")
-        print(f"\nParámetros:")
-        print(f"  - probe_radius: {self.probe_radius}")
-        print(f"  - lattice_param: {self.lattice_param:.4f}")
-        print(f"  - num_ghost_layers: {self.num_ghost_layers}")
-        print(f"  - smoothing_level: {self.smoothing_level}")
-
-        # PASO 1: Crear ghost particles
-        self.ghost_positions, self.ghost_map, self.is_ghost = create_ghost_layers(
-            self.positions_original,
-            self.box_bounds,
-            self.lattice_param,
-            self.num_ghost_layers
+    k_indices = np.arange(L)
+    slices_z = grid.sum(axis=(0, 1))
+    if occupancy_total > 0:
+        com_k = (k_indices * slices_z).sum() / occupancy_total
+        features['occupancy_spread_k'] = float(
+            np.sqrt(((k_indices - com_k)**2 * slices_z).sum() / occupancy_total)
         )
+    else:
+        features['occupancy_spread_k'] = 0.0
 
-        # PASO 2: Delaunay con ghost particles
-        print("\n[1/4] Generando Delaunay tessellation (con ghosts)...")
-        delaunay = Delaunay(self.ghost_positions)
-        print(f"  ✓ Tetraedros: {len(delaunay.simplices)}")
+    # ========== GRADIENTES DE OCUPACIÓN (4) ==========
+    if occupancy_total > 0:
+        grad_x = np.abs(np.diff(grid, axis=0)).sum()
+        grad_y = np.abs(np.diff(grid, axis=1)).sum()
+        grad_z = np.abs(np.diff(grid, axis=2)).sum()
+        features['occupancy_gradient_x'] = float(grad_x)
+        features['occupancy_gradient_y'] = float(grad_y)
+        features['occupancy_gradient_z'] = float(grad_z)
+        features['occupancy_gradient_total'] = float(grad_x + grad_y + grad_z)
+    else:
+        features['occupancy_gradient_x'] = 0.0
+        features['occupancy_gradient_y'] = 0.0
+        features['occupancy_gradient_z'] = 0.0
+        features['occupancy_gradient_total'] = 0.0
 
-        # PASO 3: Filtrar tetraedros por alpha
-        print(f"\n[2/4] Filtrando tetraedros (alpha={self.probe_radius**2:.2f})...")
-        valid_tets = self._filter_tetrahedra(delaunay)
-        print(f"  ✓ Válidos: {len(valid_tets)}/{len(delaunay.simplices)} "
-              f"({100*len(valid_tets)/len(delaunay.simplices):.1f}%)")
+    # ========== FRAGMENTACIÓN (1) ==========
+    try:
+        labeled_grid, n_clusters = label(grid)
+        features['n_fragments'] = int(n_clusters)
+    except:
+        features['n_fragments'] = 0
 
-        # PASO 4: Extraer superficie
-        print("\n[3/4] Extrayendo facetas de superficie...")
-        surface_facets = self._extract_surface_facets(delaunay, valid_tets)
-        print(f"  ✓ Facetas: {len(surface_facets)}")
-
-        # PASO 5: Construir malla (SOLO con átomos reales)
-        print("\n[4/4] Construyendo malla (filtrando ghosts)...")
-        self.surface_vertices, self.surface_faces = self._build_mesh(
-            delaunay, surface_facets
+    # ========== COMPACIDAD (2) ==========
+    if occupancy_total > 0:
+        surface = (np.abs(np.diff(grid, axis=0)).sum() +
+                  np.abs(np.diff(grid, axis=1)).sum() +
+                  np.abs(np.diff(grid, axis=2)).sum())
+        features['occupancy_surface'] = float(surface)
+        # Compacidad: volumen^(2/3) / superficie (esfera = 1.0)
+        features['occupancy_compactness'] = float(
+            occupancy_total**(2/3) / (surface + 1e-8)
         )
-        print(f"  ✓ Vértices (reales): {len(self.surface_vertices)}")
-        print(f"  ✓ Caras: {len(self.surface_faces)}")
+    else:
+        features['occupancy_surface'] = 0.0
+        features['occupancy_compactness'] = 0.0
 
-        # Suavizado
-        if self.smoothing_level > 0:
-            print(f"\n[Suavizado] {self.smoothing_level} iteraciones...")
-            self.surface_vertices = self._smooth_mesh(
-                self.surface_vertices, self.surface_faces, self.smoothing_level
-            )
+    # ========== CENTRO DE MASA DEL GRID (3) ==========
+    if occupancy_total > 0:
+        indices = np.argwhere(grid == 1)
+        com = indices.mean(axis=0)
+        features['grid_com_x'] = float(com[0] / N)
+        features['grid_com_y'] = float(com[1] / M)
+        features['grid_com_z'] = float(com[2] / L)
+    else:
+        features['grid_com_x'] = 0.5
+        features['grid_com_y'] = 0.5
+        features['grid_com_z'] = 0.5
 
-        # Área
-        self.surface_area = self._compute_surface_area()
+    # ========== ASIMETRÍA (1) ==========
+    if occupancy_total > 0:
+        x_profile = grid.sum(axis=(1, 2))
+        x_indices = np.arange(N)
+        x_mean = (x_indices * x_profile).sum() / occupancy_total
+        x_centered = x_indices - x_mean
+        skewness = (x_centered**3 * x_profile).sum() / (occupancy_total * (N/4)**3 + 1e-8)
+        features['grid_skewness_x'] = float(skewness)
+    else:
+        features['grid_skewness_x'] = 0.0
 
-        print(f"\n{'='*80}")
-        print(f"✓ COMPLETADO")
-        print(f"  Área de superficie: {self.surface_area:.4f}")
-        print(f"  Átomos superficiales: {len(self._surface_atom_indices)}")
-        print(f"{'='*80}\n")
+    # ========== ENTROPÍA ESPACIAL (1) ==========
+    if occupancy_total > 0:
+        prob = grid.flatten()
+        prob = prob[prob > 0] / occupancy_total
+        grid_entropy = -np.sum(prob * np.log(prob + 1e-10))
+        features['grid_entropy'] = float(grid_entropy)
+    else:
+        features['grid_entropy'] = 0.0
 
-        return self
-
-    def _filter_tetrahedra(self, delaunay: Delaunay) -> np.ndarray:
-        """Filtrar tetraedros por circumradius <= probe_radius"""
-        valid_tets = []
-        for tet_idx, tet in enumerate(delaunay.simplices):
-            verts = self.ghost_positions[tet]
-            circumradius = self._compute_circumradius(verts)
-            if circumradius <= self.probe_radius:
-                valid_tets.append(tet_idx)
-        return np.array(valid_tets)
-
-    def _compute_circumradius(self, vertices: np.ndarray) -> float:
-        """Calcular circumradius de tetraedro"""
-        v0, v1, v2, v3 = vertices
-
-        a = v1 - v0
-        b = v2 - v0
-        c = v3 - v0
-        volume = abs(np.dot(a, np.cross(b, c))) / 6.0
-
-        if volume < 1e-12:
-            return np.inf
-
-        A = np.array([2*(v1 - v0), 2*(v2 - v0), 2*(v3 - v0)])
-        b_vec = np.array([
-            np.dot(v1, v1) - np.dot(v0, v0),
-            np.dot(v2, v2) - np.dot(v0, v0),
-            np.dot(v3, v3) - np.dot(v0, v0)
-        ])
-
+    # ========== MOMENTOS DE INERCIA DEL GRID (3) ==========
+    if occupancy_total > 0:
         try:
-            center = np.linalg.solve(A, b_vec)
-            R = np.linalg.norm(center - v0)
-            return R
-        except np.linalg.LinAlgError:
-            return np.inf
+            coords = np.argwhere(grid == 1)
+            centered = coords - coords.mean(axis=0)
 
-    def _extract_surface_facets(self, delaunay: Delaunay, valid_tets: np.ndarray) -> list:
-        """Extraer facetas de superficie (fronteras entre tetraedros válidos e inválidos)"""
-        valid_tet_set = set(valid_tets)
-        facet_to_tets = {}
+            Ixx = np.sum(centered[:, 1]**2 + centered[:, 2]**2)
+            Iyy = np.sum(centered[:, 0]**2 + centered[:, 2]**2)
+            Izz = np.sum(centered[:, 0]**2 + centered[:, 1]**2)
+            Ixy = -np.sum(centered[:, 0] * centered[:, 1])
+            Ixz = -np.sum(centered[:, 0] * centered[:, 2])
+            Iyz = -np.sum(centered[:, 1] * centered[:, 2])
 
-        for tet_idx, tet in enumerate(delaunay.simplices):
-            is_valid = tet_idx in valid_tet_set
-            for i in range(4):
-                facet = tuple(sorted(np.delete(tet, i)))
-                facet_key = frozenset(facet)
-                if facet_key not in facet_to_tets:
-                    facet_to_tets[facet_key] = []
-                facet_to_tets[facet_key].append((tet_idx, is_valid))
+            I_tensor = np.array([[Ixx, Ixy, Ixz],
+                                [Ixy, Iyy, Iyz],
+                                [Ixz, Iyz, Izz]])
 
-        surface_facets = []
-        for facet_key, tet_list in facet_to_tets.items():
-            valid_count = sum(1 for _, is_valid in tet_list if is_valid)
-            if valid_count == 1:  # Faceta en frontera
-                surface_facets.append(list(facet_key))
+            eigenvalues = np.sort(np.linalg.eigvalsh(I_tensor))[::-1]
+            features['grid_moi_1'] = float(eigenvalues[0])
+            features['grid_moi_2'] = float(eigenvalues[1])
+            features['grid_moi_3'] = float(eigenvalues[2])
+        except:
+            features['grid_moi_1'] = 0.0
+            features['grid_moi_2'] = 0.0
+            features['grid_moi_3'] = 0.0
+    else:
+        features['grid_moi_1'] = 0.0
+        features['grid_moi_2'] = 0.0
+        features['grid_moi_3'] = 0.0
 
-        return surface_facets
+    # ========== DENSIDAD POR CAPAS (5) ==========
+    # Capas importantes: inicio (z=0,1), medio (z=4,5) y final (z=8)
+    for z in [0, 1, 4, 5, 8]:
+        if z < L:
+            features[f'occupancy_layer_z{z}'] = float(grid[:, :, z].sum())
+        else:
+            features[f'occupancy_layer_z{z}'] = 0.0
 
-    def _build_mesh(self, delaunay: Delaunay, surface_facets: list) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Construir malla SOLO con átomos REALES (sin ghosts)
-        """
-        if not surface_facets:
-            self._surface_atom_indices = np.array([], dtype=int)
-            return np.array([]), np.array([])
+    return features
 
-        # Extraer índices únicos de vértices superficiales
-        all_surface_indices = set()
-        for facet in surface_facets:
-            all_surface_indices.update(facet)
 
-        # FILTRAR: mantener solo índices de átomos REALES (no ghosts)
-        n_real_atoms = len(self.positions_original)
-        real_surface_indices = [idx for idx in all_surface_indices
-                                if idx < n_real_atoms]
+def calc_hull_features(positions: np.ndarray) -> Dict[str, float]:
+    """
+    Calcula 2 features del Convex Hull
 
-        real_surface_indices = sorted(real_surface_indices)
+    Args:
+        positions: array Nx3 de posiciones (sin normalizar)
 
-        print(f"    - Vértices totales en superficie: {len(all_surface_indices)}")
-        print(f"    - Vértices ghost: {len(all_surface_indices) - len(real_surface_indices)}")
-        print(f"    - Vértices reales: {len(real_surface_indices)}")
+    Returns:
+        features: hull_volume, hull_area
+    """
+    if len(positions) < 4:
+        return {'hull_volume': np.nan, 'hull_area': np.nan}
 
-        if not real_surface_indices:
-            self._surface_atom_indices = np.array([], dtype=int)
-            return np.array([]), np.array([])
+    try:
+        hull = ConvexHull(positions)
+        return {
+            'hull_volume': float(hull.volume),
+            'hull_area': float(hull.area)
+        }
+    except:
+        return {'hull_volume': np.nan, 'hull_area': np.nan}
 
-        # Guardar índices de átomos superficiales (en array original)
-        self._surface_atom_indices = np.array(real_surface_indices, dtype=int)
 
-        # Crear mapeo de índices
-        vertex_map = {old_idx: new_idx
-                     for new_idx, old_idx in enumerate(real_surface_indices)}
+def calc_inertia_features(positions: np.ndarray) -> Dict[str, float]:
+    """
+    Calcula 3 momentos de inercia principales
 
-        # Extraer vértices (de posiciones originales)
-        vertices = self.positions_original[real_surface_indices]
+    Args:
+        positions: array Nx3 de posiciones
 
-        # Remapear caras (solo caras que tienen todos sus vértices reales)
-        faces = []
-        for facet in surface_facets:
-            # Verificar si todos los vértices son reales
-            if all(v < n_real_atoms for v in facet):
-                remapped_facet = [vertex_map[v] for v in facet]
-                faces.append(remapped_facet)
+    Returns:
+        features: moi_principal_1, moi_principal_2, moi_principal_3
+    """
+    if len(positions) < 3:
+        return {f'moi_principal_{i}': np.nan for i in [1, 2, 3]}
 
-        print(f"    - Caras válidas (solo vértices reales): {len(faces)}")
+    centered = positions - positions.mean(axis=0)
 
-        return vertices, np.array(faces)
+    Ixx = np.sum(centered[:, 1]**2 + centered[:, 2]**2)
+    Iyy = np.sum(centered[:, 0]**2 + centered[:, 2]**2)
+    Izz = np.sum(centered[:, 0]**2 + centered[:, 1]**2)
 
-    def _smooth_mesh(self, vertices: np.ndarray, faces: np.ndarray, iterations: int) -> np.ndarray:
-        """Suavizado Laplaciano de malla"""
-        smoothed_vertices = vertices.copy()
+    Ixy = -np.sum(centered[:, 0] * centered[:, 1])
+    Ixz = -np.sum(centered[:, 0] * centered[:, 2])
+    Iyz = -np.sum(centered[:, 1] * centered[:, 2])
 
-        for iteration in range(iterations):
-            new_vertices = smoothed_vertices.copy()
-            vertex_neighbors = [set() for _ in range(len(smoothed_vertices))]
+    I_tensor = np.array([[Ixx, Ixy, Ixz],
+                        [Ixy, Iyy, Iyz],
+                        [Ixz, Iyz, Izz]])
 
-            for face in faces:
-                for i in range(len(face)):
-                    for j in range(len(face)):
-                        if i != j:
-                            vertex_neighbors[face[i]].add(face[j])
+    eigenvalues = np.sort(np.linalg.eigvalsh(I_tensor))[::-1]
 
-            for v_idx in range(len(smoothed_vertices)):
-                neighbors = list(vertex_neighbors[v_idx])
-                if neighbors and len(neighbors) > 2:
-                    new_vertices[v_idx] = smoothed_vertices[neighbors].mean(axis=0)
+    return {
+        'moi_principal_1': float(eigenvalues[0]),
+        'moi_principal_2': float(eigenvalues[1]),
+        'moi_principal_3': float(eigenvalues[2])
+    }
 
-            smoothed_vertices = new_vertices
 
-        return smoothed_vertices
+def calc_radial_features(positions: np.ndarray) -> Dict[str, float]:
+    """
+    Calcula 2 features de distribución radial (RDF)
 
-    def _compute_surface_area(self) -> float:
-        """Calcular área de superficie total"""
-        if self.surface_faces is None or len(self.surface_faces) == 0:
-            return 0.0
+    Args:
+        positions: array Nx3 de posiciones
 
-        total_area = 0.0
-        for face in self.surface_faces:
-            if len(face) == 3:
-                v0, v1, v2 = self.surface_vertices[face]
-                edge1 = v1 - v0
-                edge2 = v2 - v0
-                area = 0.5 * np.linalg.norm(np.cross(edge1, edge2))
-                total_area += area
+    Returns:
+        features: rdf_mean, rdf_kurtosis
+    """
+    if len(positions) < 2:
+        return {'rdf_mean': np.nan, 'rdf_kurtosis': np.nan}
 
-        return total_area
+    com = positions.mean(axis=0)
+    distances = np.linalg.norm(positions - com, axis=1)
 
-    def get_surface_atoms_indices(self) -> np.ndarray:
-        """
-        Obtener índices de átomos superficiales (en array original)
+    return {
+        'rdf_mean': float(distances.mean()),
+        'rdf_kurtosis': float(kurtosis(distances))
+    }
 
-        Returns:
-            array de índices
-        """
-        return self._surface_atom_indices if self._surface_atom_indices is not None else np.array([], dtype=int)
+
+def calc_entropy_feature(positions: np.ndarray) -> Dict[str, float]:
+    """
+    Calcula 1 feature de entropía espacial
+
+    Args:
+        positions: array Nx3 de posiciones
+
+    Returns:
+        features: entropy_spatial
+    """
+    if len(positions) < 2:
+        return {'entropy_spatial': np.nan}
+
+    H, _ = np.histogramdd(positions, bins=10)
+    H_flat = H.flatten()
+    H_norm = H_flat[H_flat > 0] / H_flat.sum()
+
+    return {'entropy_spatial': float(entropy(H_norm))}
+
+
+def calc_bandwidth_feature(positions: np.ndarray) -> Dict[str, float]:
+    """
+    Calcula 1 feature de bandwidth de clustering (MeanShift)
+
+    Args:
+        positions: array Nx3 de posiciones
+
+    Returns:
+        features: ms_bandwidth
+    """
+    if len(positions) < 10:
+        return {'ms_bandwidth': np.nan}
+
+    try:
+        bandwidth = estimate_bandwidth(
+            positions,
+            quantile=0.2,
+            n_samples=min(500, len(positions))
+        )
+
+        if bandwidth <= 0:
+            from sklearn.neighbors import NearestNeighbors
+            nn = NearestNeighbors(n_neighbors=2)
+            nn.fit(positions)
+            distances, _ = nn.kneighbors(positions)
+            bandwidth = np.mean(distances[:, 1]) * 2.0
+
+        return {'ms_bandwidth': float(bandwidth)}
+    except:
+        return {'ms_bandwidth': np.nan}
+
+
+def extract_all_features(positions: np.ndarray) -> Dict[str, float]:
+    """
+    Extrae todas las 37 features de un conjunto de posiciones
+
+    PROCESO:
+    1. Normalizar posiciones (PCA + escalado por A0)
+    2. Calcular 26 features del grid 3D
+    3. Calcular 2 features de ConvexHull
+    4. Calcular 3 momentos de inercia principales
+    5. Calcular 2 features radiales (RDF)
+    6. Calcular 1 entropía espacial
+    7. Calcular 1 bandwidth de clustering
+
+    Args:
+        positions: array Nx3 de posiciones atómicas (Angstroms)
+
+    Returns:
+        features: diccionario con 37 features en orden FEATURE_ORDER
+    """
+    # 1. Normalizar posiciones
+    normalized_pos, box_size = normalize_positions(positions)
+
+    # 2. Calcular todas las features
+    features = {}
+
+    # Grid features (26)
+    features.update(calc_grid_features(normalized_pos, box_size))
+
+    # Hull features (2)
+    features.update(calc_hull_features(positions))
+
+    # Inertia features (3)
+    features.update(calc_inertia_features(positions))
+
+    # Radial features (2)
+    features.update(calc_radial_features(positions))
+
+    # Entropy features (1)
+    features.update(calc_entropy_feature(positions))
+
+    # Bandwidth features (1)
+    features.update(calc_bandwidth_feature(positions))
+
+    # Validar que tenemos todas las features
+    if len(features) != len(FEATURE_ORDER):
+        missing = set(FEATURE_ORDER) - set(features.keys())
+        extra = set(features.keys()) - set(FEATURE_ORDER)
+        raise ValueError(
+            f"Número de features incorrecto. "
+            f"Esperado: {len(FEATURE_ORDER)}, Obtenido: {len(features)}. "
+            f"Faltantes: {missing}, Extras: {extra}"
+        )
+
+    return features
+
+
+def features_to_array(features: Dict[str, float]) -> np.ndarray:
+    """
+    Convierte diccionario de features a array ordenado
+
+    CRÍTICO: Usa el orden definido en FEATURE_ORDER para consistencia
+
+    Args:
+        features: diccionario con features
+
+    Returns:
+        array de features en orden correcto
+    """
+    return np.array([features[name] for name in FEATURE_ORDER])
