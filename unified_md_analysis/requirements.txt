@@ -1,0 +1,16 @@
+# Core dependencies
+numpy>=1.21.0
+pandas>=1.3.0
+scipy>=1.7.0
+scikit-learn>=1.0.0
+joblib>=1.0.0
+
+# Optional dependencies
+hdbscan>=0.8.27  # Para clustering HDBSCAN (opcional)
+
+# Para extraer superficie con OVITO (solo si se usa extract con OVITO)
+# ovito>=3.7.0  # Descomentar si se necesita OVITO
+
+# Visualization (opcional, no usado en versión CLI)
+# matplotlib>=3.4.0
+# plotly>=5.0.0
