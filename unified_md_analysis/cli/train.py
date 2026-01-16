@@ -21,7 +21,7 @@ def main():
 Entrena un modelo Random Forest para predecir número de vacancias.
 
 El CSV de entrada debe contener:
-  - Columnas de features (37 features geométricas)
+  - Columnas de features (35 features geométricas)
   - Columna 'n_vacancies' (target)
 
 Ejemplos:

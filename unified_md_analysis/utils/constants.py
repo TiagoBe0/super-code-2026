@@ -25,7 +25,7 @@ TEST_SIZE = 0.2  # Proporción de datos para testing
 
 # Features
 N_GRID_FEATURES = 26  # Número de features extraídas del grid 3D
-N_TOTAL_FEATURES = 37  # Número total de features extraídas
+N_TOTAL_FEATURES = 35  # Número total de features extraídas (26+2+3+2+1+1)
 
 # Lista ordenada de features (CRÍTICO: mantener este orden)
 FEATURE_ORDER = [

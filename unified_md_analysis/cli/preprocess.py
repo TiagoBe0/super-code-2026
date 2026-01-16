@@ -21,7 +21,7 @@ def main():
         description="Preprocesamiento: Extracción de features para Machine Learning",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Extrae 37 features geométricas de archivos dump:
+Extrae 35 features geométricas de archivos dump:
   - 26 features del grid 3D de ocupación
   - 2 features del Convex Hull
   - 3 momentos de inercia principales

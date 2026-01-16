@@ -107,7 +107,7 @@ class ClusteringEngine:
 - ✅ **Sin Streamlit** - CLI puro
 - ✅ PCA optimizado con `covariance_eigh`
 - ✅ **26 features del grid 3D** (básicas + avanzadas)
-- ✅ Total: 37 features completas
+- ✅ Total: 35 features completas
 - ✅ Compatible con OVITO (opcional)
 
 ### **Código Implementado**
@@ -262,7 +262,7 @@ RANDOM_STATE = 42
 TEST_SIZE = 0.2
 
 # Features (CRÍTICO)
-FEATURE_ORDER = [...]  # 37 features en orden exacto
+FEATURE_ORDER = [...]  # 35 features en orden exacto
 ```
 
 ---

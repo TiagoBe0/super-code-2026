@@ -18,7 +18,7 @@ def create_parser():
 PIPELINE COMPLETO:
   1. Alpha Shape: Extrae superficie con Ghost Particles
   2. Clustering (opcional): Separa nanoporos individuales
-  3. Preprocesamiento: Calcula 37 features geométricas
+  3. Preprocesamiento: Calcula 35 features geométricas
   4. Training: Entrena modelo Random Forest
   5. Predicción: Predice vacancias en nuevos dumps
 

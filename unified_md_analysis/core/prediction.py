@@ -21,7 +21,7 @@ class VacancyPredictor:
     Pipeline:
     1. Carga modelo entrenado
     2. Lee dump file
-    3. Extrae 37 features
+    3. Extrae 35 features
     4. Predice número de vacancias
     """
 

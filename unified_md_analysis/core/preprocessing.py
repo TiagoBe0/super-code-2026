@@ -1,6 +1,6 @@
 """
 Preprocesamiento: Extracción de Features para Machine Learning
-Análisis de geometría de nanoporos - Extrae 37 features desde posiciones atómicas
+Análisis de geometría de nanoporos - Extrae 35 features desde posiciones atómicas
 """
 
 import numpy as np
@@ -351,7 +351,7 @@ def calc_bandwidth_feature(positions: np.ndarray) -> Dict[str, float]:
 
 def extract_all_features(positions: np.ndarray) -> Dict[str, float]:
     """
-    Extrae todas las 37 features de un conjunto de posiciones
+    Extrae todas las 35 features de un conjunto de posiciones
 
     PROCESO:
     1. Normalizar posiciones (PCA + escalado por A0)
@@ -366,7 +366,7 @@ def extract_all_features(positions: np.ndarray) -> Dict[str, float]:
         positions: array Nx3 de posiciones atómicas (Angstroms)
 
     Returns:
-        features: diccionario con 37 features en orden FEATURE_ORDER
+        features: diccionario con 35 features en orden FEATURE_ORDER
     """
     # 1. Normalizar posiciones
     normalized_pos, box_size = normalize_positions(positions)

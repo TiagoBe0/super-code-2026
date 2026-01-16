@@ -6,7 +6,7 @@ Software unificado para análisis de estructuras cristalinas FCC/BCC en simulaci
 
 - **Alpha Shape**: Detección de superficie con Ghost Particles
 - **Clustering**: Separación de nanoporos con HDBSCAN, KMeans, MeanShift, Agglomerative
-- **Preprocesamiento**: Extracción de 37 features geométricas para Machine Learning
+- **Preprocesamiento**: Extracción de 35 features geométricas para Machine Learning
 - **Training**: Entrenamiento de Random Forest para predicción de vacancias
 - **Predicción**: Inferencia de vacancias en nuevos dumps
 
@@ -17,7 +17,7 @@ unified_md_analysis/
 ├── core/
 │   ├── surface_detection.py  # Alpha Shape + Ghost Particles
 │   ├── clustering.py          # Clustering (HDBSCAN, KMeans, etc.)
-│   ├── preprocessing.py       # Extracción de 37 features
+│   ├── preprocessing.py       # Extracción de 35 features
 │   ├── training.py            # Entrenamiento Random Forest
 │   └── prediction.py          # Predicción de vacancias
 ├── utils/
@@ -91,7 +91,7 @@ python main.py cluster surface.dump clusters_dir/ --method meanshift
 
 ### 3️⃣ Preprocesamiento (Extracción de Features)
 
-Extrae 37 features geométricas para Machine Learning:
+Extrae 35 features geométricas para Machine Learning:
 
 ```bash
 python main.py preprocess surface_dumps_dir/ --output features.csv
@@ -209,7 +209,7 @@ Basado en el análisis del repositorio original:
 |-------|-------------|-------|
 | **Alpha Shape** | `alpha_shape_ghost_particles.py` | Clase modular, sin Streamlit, auto-detecta lattice |
 | **Clustering** | `cluster_app_spirit.py` | 4 algoritmos, métricas completas |
-| **Preprocesamiento** | `simplified_extractor_enhanced.py` | 37 features, PCA optimizado |
+| **Preprocesamiento** | `simplified_extractor_enhanced.py` | 35 features, PCA optimizado |
 | **Training** | `train_simplified.py` | Código limpio, 330 líneas |
 | **Predicción** | `vacancy_batch_predict.py` | Batch optimizado, consistente |
 
